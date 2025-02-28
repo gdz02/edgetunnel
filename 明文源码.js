@@ -53,6 +53,15 @@ export default {
 			const UA = request.headers.get('User-Agent') || 'null';
 			const userAgent = UA.toLowerCase();
 			userID = env.UUID || env.uuid || env.PASSWORD || env.pswd || userID;
+			// 处理多个UUID的情况
+			if (userID && userID.includes(',')) {
+				const uuids = userID.split(',').map(id => id.trim());
+				// 检查每个UUID是否有效
+				const validUuids = uuids.filter(id => isValidUUID(id));
+				if (validUuids.length > 0) {
+					userID = validUuids[0]; // 使用第一个有效的UUID
+				}
+			}
 			if (env.KEY || env.TOKEN || (userID && !isValidUUID(userID))) {
 				动态UUID = env.KEY || env.TOKEN || userID;
 				有效时间 = Number(env.TIME) || 有效时间;
