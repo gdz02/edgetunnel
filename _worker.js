@@ -121,6 +121,10 @@ export default {
                 } else if (访问路径 === 'admin/log.json') {// 读取日志内容
                     const 读取日志内容 = await env.KV.get('log.json') || '[]';
                     return new Response(读取日志内容, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                } else if (访问路径 === 'admin/api/token') {
+                    const 指定用户 = url.searchParams.get('user') || userID;
+                    const 订阅TOKEN = await MD5MD5(host + 指定用户);
+                    return new Response(JSON.stringify({ user: 指定用户, token: 订阅TOKEN }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
                 } else if (访问路径 === 'admin/api/selftest') {
                     const hasKV = !!env.KV;
                     const hasDefault = hasKV ? !!(await env.KV.get('users/' + userID)) : false;
