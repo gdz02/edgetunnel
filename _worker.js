@@ -17,6 +17,22 @@ export default {
         const userID = (envUUID && uuidRegex.test(envUUID)) ? envUUID.toLowerCase() : [userIDMD5.slice(0, 8), userIDMD5.slice(8, 12), '4' + userIDMD5.slice(13, 16), '8' + userIDMD5.slice(17, 20), userIDMD5.slice(20)].join('-');
         const hosts = env.HOST ? (await 整理成数组(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]) : [url.hostname];
         const host = hosts[0];
+        if (env.KV) {
+            try {
+                const exist = await env.KV.get('users/' + userID);
+                if (!exist) {
+                    const user = { uuid: userID, expiresAt: null, disabled: false, note: 'default-from-env', createdAt: Date.now() };
+                    ctx.waitUntil(env.KV.put('users/' + userID, JSON.stringify(user, null, 2)));
+                    const idxTxt = await env.KV.get('users/index');
+                    let idx = idxTxt ? JSON.parse(idxTxt) : [];
+                    if (!Array.isArray(idx)) idx = [];
+                    if (!idx.find(x => x.uuid === userID)) {
+                        idx.push({ uuid: userID, expiresAt: null, disabled: false, note: 'default-from-env' });
+                        ctx.waitUntil(env.KV.put('users/index', JSON.stringify(idx, null, 2)));
+                    }
+                }
+            } catch (e) { }
+        }
         if (env.PROXYIP) {
             const proxyIPs = await 整理成数组(env.PROXYIP);
             反代IP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
@@ -55,9 +71,60 @@ export default {
                 const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
                 // 没有cookie或cookie错误，跳转到/login页面
                 if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
-                if (访问路径 === 'admin/log.json') {// 读取日志内容
+                if (访问路径 === 'admin/api/users') {
+                    if (request.method === 'GET') {
+                        const idxTxt = await env.KV.get('users/index');
+                        const idx = idxTxt ? JSON.parse(idxTxt) : [];
+                        return new Response(JSON.stringify(idx, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    } else if (request.method === 'POST') {
+                        const body = await request.json();
+                        let u = body.uuid || 生成UUIDv4();
+                        const user = {
+                            uuid: u,
+                            expiresAt: body.expiresAt || null,
+                            disabled: !!body.disabled,
+                            note: body.note || null,
+                            createdAt: Date.now(),
+                            trojanPassword: body.trojanPassword || null,
+                        };
+                        await env.KV.put('users/' + u, JSON.stringify(user, null, 2));
+                        const idxTxt = await env.KV.get('users/index');
+                        let idx = idxTxt ? JSON.parse(idxTxt) : [];
+                        if (!Array.isArray(idx)) idx = [];
+                        if (!idx.find(x => x.uuid === u)) idx.push({ uuid: u, expiresAt: user.expiresAt, disabled: user.disabled, note: user.note });
+                        await env.KV.put('users/index', JSON.stringify(idx, null, 2));
+                        if (user.trojanPassword) {
+                            await env.KV.put('users-trojan/' + sha224(user.trojanPassword), u);
+                        }
+                        return new Response(JSON.stringify({ success: true, uuid: u }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    } else return new Response(JSON.stringify({ error: '不支持的方法' }), { status: 405, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                } else if (访问路径.startsWith('admin/api/users/')) {
+                    const parts = 区分大小写访问路径.split('/');
+                    const uuid = parts[parts.length - 1];
+                    if (!uuid) return new Response(JSON.stringify({ error: '缺少uuid' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    if (request.method === 'GET') {
+                        const txt = await env.KV.get('users/' + uuid);
+                        if (!txt) return new Response(JSON.stringify({ error: '未找到用户' }), { status: 404, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                        return new Response(txt, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    } else if (request.method === 'DELETE') {
+                        await env.KV.put('users/' + uuid, '');
+                        const idxTxt = await env.KV.get('users/index');
+                        let idx = idxTxt ? JSON.parse(idxTxt) : [];
+                        if (Array.isArray(idx)) idx = idx.filter(x => x.uuid !== uuid);
+                        await env.KV.put('users/index', JSON.stringify(idx, null, 2));
+                        return new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                    } else return new Response(JSON.stringify({ error: '不支持的方法' }), { status: 405, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                }
+                if (访问路径 === 'admin/users') {
+                    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>用户管理</title><style>body{font-family:system-ui,Segoe UI,Arial;margin:24px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:8px;text-align:left}input,button,select{padding:6px;margin:4px}</style></head><body><h2>用户管理</h2><div><button id="refresh">刷新列表</button></div><table id="list"><thead><tr><th>UUID</th><th>到期</th><th>禁用</th><th>备注</th><th>操作</th></tr></thead><tbody></tbody></table><h3>创建/更新用户</h3><div><label>UUID(留空自动生成)</label><br/><input id="uuid" style="width:380px"/><br/><label>到期时间(ISO 或 毫秒)</label><br/><input id="expires" style="width:380px"/><br/><label>禁用</label><br/><select id="disabled"><option value="false">否</option><option value="true">是</option></select><br/><label>备注</label><br/><input id="note" style="width:380px"/><br/><label>Trojan密码(可选)</label><br/><input id="trojan" style="width:380px"/><br/><button id="save">保存</button></div><script>async function load(){const r=await fetch('/admin/api/users');const arr=await r.json();const tb=document.querySelector('#list tbody');tb.innerHTML='';(arr||[]).forEach(x=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${x.uuid}</td><td>${x.expiresAt??''}</td><td>${x.disabled? '是':'否'}</td><td>${x.note??''}</td><td><button data-id="${x.uuid}" class="del">删除</button></td>`;tb.appendChild(tr);});tb.querySelectorAll('.del').forEach(b=>b.onclick=async()=>{const id=b.getAttribute('data-id');const r=await fetch('/admin/api/users/'+id,{method:'DELETE'});if(r.ok)load();});}document.getElementById('refresh').onclick=load;document.getElementById('save').onclick=async()=>{const uuid=document.getElementById('uuid').value||undefined;const expires=document.getElementById('expires').value||undefined;const disabled=document.getElementById('disabled').value==='true';const note=document.getElementById('note').value||undefined;const trojanPassword=document.getElementById('trojan').value||undefined;const r=await fetch('/admin/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid,expiresAt:expires,disabled,note,trojanPassword})});if(r.ok){alert('保存成功');load();}else{alert('保存失败')}};load();</script></body></html>`;
+                    return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+                } else if (访问路径 === 'admin/log.json') {// 读取日志内容
                     const 读取日志内容 = await env.KV.get('log.json') || '[]';
                     return new Response(读取日志内容, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+                } else if (访问路径 === 'admin/api/selftest') {
+                    const hasKV = !!env.KV;
+                    const hasDefault = hasKV ? !!(await env.KV.get('users/' + userID)) : false;
+                    return new Response(JSON.stringify({ success: true, kv: hasKV, defaultUser: hasDefault }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
                 } else if (区分大小写访问路径 === 'admin/getCloudflareUsage') {// 查询请求量
                     try {
                         const Usage_JSON = await getCloudflareUsage(url.searchParams.get('Email'), url.searchParams.get('GlobalAPIKey'), url.searchParams.get('AccountID'), url.searchParams.get('APIToken'));
@@ -190,9 +257,10 @@ export default {
                 响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
                 return 响应;
             } else if (访问路径 === 'sub') {//处理订阅请求
-                const 订阅TOKEN = await MD5MD5(host + userID);
+                const 指定用户 = url.searchParams.get('user') || userID;
+                const 订阅TOKEN = await MD5MD5(host + 指定用户);
                 if (url.searchParams.get('token') === 订阅TOKEN) {
-                    config_JSON = await 读取config_JSON(env, host, userID, env.PATH);
+                    config_JSON = await 读取config_JSON(env, host, 指定用户, env.PATH);
                     ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_SUB', config_JSON));
                     const ua = UA.toLowerCase();
                     const expire = 4102329600;//2099-12-31 到期时间
@@ -331,7 +399,7 @@ export default {
             }
         } else if (管理员密码) {// ws代理
             await 反代参数获取(request);
-            return await 处理WS请求(request, userID);
+            return await 处理WS请求(request, env, userID);
         }
 
         let 伪装页URL = env.URL || 'nginx';
@@ -354,7 +422,7 @@ export default {
     }
 };
 ///////////////////////////////////////////////////////////////////////WS传输数据///////////////////////////////////////////////
-async function 处理WS请求(request, yourUUID) {
+async function 处理WS请求(request, env, 默认UUID) {
     const wssPair = new WebSocketPair();
     const [clientSock, serverSock] = Object.values(wssPair);
     serverSock.accept();
@@ -363,6 +431,23 @@ async function 处理WS请求(request, yourUUID) {
     const earlyData = request.headers.get('sec-websocket-protocol') || '';
     const readable = makeReadableStr(serverSock, earlyData);
     let 判断是否是木马 = null;
+    async function 读取用户(env, uuid) {
+        try {
+            const txt = await env.KV.get('users/' + uuid);
+            if (!txt) return null;
+            const obj = JSON.parse(txt);
+            return obj && obj.uuid === uuid ? obj : null;
+        } catch (e) { return null; }
+    }
+    function 用户状态检查(user) {
+        if (!user) return 'not_found';
+        if (user.disabled) return 'disabled';
+        if (user.expiresAt) {
+            const exp = typeof user.expiresAt === 'string' ? Date.parse(user.expiresAt) : Number(user.expiresAt);
+            if (isFinite(exp) && Date.now() > exp) return 'expired';
+        }
+        return null;
+    }
     readable.pipeTo(new WritableStream({
         async write(chunk) {
             if (isDnsQuery) return await forwardataudp(chunk, serverSock, null);
@@ -386,11 +471,35 @@ async function 处理WS请求(request, yourUUID) {
             }
 
             if (判断是否是木马) {
-                const { port, hostname, rawClientData } = 解析木马请求(chunk, yourUUID);
+                let 连接用户UUID = 默认UUID;
+                let headerOK = chunk.byteLength >= 58 && new Uint8Array(chunk.slice(56, 58))[0] === 0x0d && new Uint8Array(chunk.slice(56, 58))[1] === 0x0a;
+                if (headerOK) {
+                    const headerHash = new TextDecoder().decode(chunk.slice(0, 56));
+                    const mappedUUID = await env.KV.get('users-trojan/' + headerHash);
+                    if (mappedUUID) 连接用户UUID = mappedUUID;
+                }
+                const user = await 读取用户(env, 连接用户UUID);
+                const reason = 用户状态检查(user);
+                if (reason) {
+                    try { serverSock.close(1008, reason); } catch (e) { }
+                    const 访问IP = request.headers.get('X-Real-IP') || request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || request.headers.get('True-Client-IP') || request.headers.get('Fly-Client-IP') || request.headers.get('X-Appengine-Remote-Addr') || request.headers.get('X-Forwarded-For') || request.headers.get('X-Real-IP') || request.headers.get('X-Cluster-Client-IP') || request.cf?.clientTcpRtt || '未知IP';
+                    try { await 请求日志记录(env, request, 访问IP, 'Auth_Denied', null, 连接用户UUID, reason); } catch (e) { }
+                    return;
+                }
+                const { port, hostname, rawClientData } = 解析木马请求(chunk, user?.trojanPassword || 连接用户UUID);
                 if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
-                await forwardataTCP(hostname, port, rawClientData, serverSock, null, remoteConnWrapper, yourUUID);
+                await forwardataTCP(hostname, port, rawClientData, serverSock, null, remoteConnWrapper, 连接用户UUID);
             } else {
-                const { port, hostname, rawIndex, version, isUDP } = 解析魏烈思请求(chunk, yourUUID);
+                const presentedUUID = formatIdentifier(new Uint8Array(chunk.slice(1, 17)));
+                const user = await 读取用户(env, presentedUUID);
+                const reason = 用户状态检查(user);
+                if (reason) {
+                    try { serverSock.close(1008, reason); } catch (e) { }
+                    const 访问IP = request.headers.get('X-Real-IP') || request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || request.headers.get('True-Client-IP') || request.headers.get('Fly-Client-IP') || request.headers.get('X-Appengine-Remote-Addr') || request.headers.get('X-Forwarded-For') || request.headers.get('X-Real-IP') || request.headers.get('X-Cluster-Client-IP') || request.cf?.clientTcpRtt || '未知IP';
+                    try { await 请求日志记录(env, request, 访问IP, 'Auth_Denied', null, presentedUUID, reason); } catch (e) { }
+                    return;
+                }
+                const { port, hostname, rawIndex, version, isUDP } = 解析魏烈思请求(chunk, presentedUUID);
                 if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
                 if (isUDP) {
                     if (port === 53) isDnsQuery = true;
@@ -399,7 +508,7 @@ async function 处理WS请求(request, yourUUID) {
                 const respHeader = new Uint8Array([version[0], 0]);
                 const rawData = chunk.slice(rawIndex);
                 if (isDnsQuery) return forwardataudp(rawData, serverSock, respHeader);
-                await forwardataTCP(hostname, port, rawData, serverSock, respHeader, remoteConnWrapper, yourUUID);
+                await forwardataTCP(hostname, port, rawData, serverSock, respHeader, remoteConnWrapper, presentedUUID);
             }
         },
     })).catch((err) => {
@@ -623,6 +732,13 @@ function formatIdentifier(arr, offset = 0) {
     const hex = [...arr.slice(offset, offset + 16)].map(b => b.toString(16).padStart(2, '0')).join('');
     return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
 }
+function 生成UUIDv4() {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    return formatIdentifier(b);
+}
 async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
     let header = headerData, hasData = false;
     await remoteSocket.readable.pipeTo(
@@ -792,11 +908,11 @@ function surge(content, url, config_JSON) {
     return 输出内容;
 }
 
-async function 请求日志记录(env, request, 访问IP, 请求类型 = "Get_SUB", config_JSON) {
+async function 请求日志记录(env, request, 访问IP, 请求类型 = "Get_SUB", config_JSON, 用户 = null, 原因 = null) {
     const KV容量限制 = 4;//MB
     try {
         const 当前时间 = new Date();
-        const 日志内容 = { TYPE: 请求类型, IP: 访问IP, ASN: `AS${request.cf.asn || '0'} ${request.cf.asOrganization || 'Unknown'}`, CC: `${request.cf.country || 'N/A'} ${request.cf.city || 'N/A'}`, URL: request.url, UA: request.headers.get('User-Agent') || 'Unknown', TIME: 当前时间.getTime() };
+        const 日志内容 = { TYPE: 请求类型, IP: 访问IP, ASN: `AS${request.cf.asn || '0'} ${request.cf.asOrganization || 'Unknown'}`, CC: `${request.cf.country || 'N/A'} ${request.cf.city || 'N/A'}`, URL: request.url, UA: request.headers.get('User-Agent') || 'Unknown', TIME: 当前时间.getTime(), USER: 用户, REASON: 原因 };
         let 日志数组 = [];
         const 现有日志 = await env.KV.get('log.json');
         if (现有日志) {
@@ -812,7 +928,7 @@ async function 请求日志记录(env, request, 访问IP, 请求类型 = "Get_SU
                     日志数组.push(日志内容);
                     while (JSON.stringify(日志数组, null, 2).length > KV容量限制 * 1024 * 1024 && 日志数组.length > 0) 日志数组.shift();
                 }
-                if (config_JSON.TG.启用) {
+                if (config_JSON && config_JSON.TG && config_JSON.TG.启用) {
                     try {
                         const TG_TXT = await env.KV.get('tg.json');
                         const TG_JSON = JSON.parse(TG_TXT);
