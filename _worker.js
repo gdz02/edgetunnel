@@ -3,6 +3,31 @@ let config_JSON, 反代IP = '', 启用SOCKS5反代 = null, 启用SOCKS5全局反
 let 缓存反代IP, 缓存反代解析数组, 缓存反代数组索引 = 0, 启用反代兜底 = true;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io';
+const 用户缓存 = new Map();
+const 木马缓存 = new Map();
+const 缓存TTL = 60000;
+async function 读取用户缓存(env, uuid) {
+    const now = Date.now();
+    const c = 用户缓存.get(uuid);
+    if (c && c.exp > now) return c.val;
+    try {
+        const txt = await env.KV.get('users/' + uuid);
+        if (!txt) return null;
+        const obj = JSON.parse(txt);
+        用户缓存.set(uuid, { val: obj, exp: now + 缓存TTL });
+        return obj && obj.uuid === uuid ? obj : null;
+    } catch (e) { return null; }
+}
+async function 读取木马映射缓存(env, headerHash) {
+    const now = Date.now();
+    const c = 木马缓存.get(headerHash);
+    if (c && c.exp > now) return c.val;
+    try {
+        const mappedUUID = await env.KV.get('users-trojan/' + headerHash);
+        木马缓存.set(headerHash, { val: mappedUUID, exp: now + 缓存TTL });
+        return mappedUUID;
+    } catch (e) { return null; }
+}
 ///////////////////////////////////////////////////////主程序入口///////////////////////////////////////////////
 export default {
     async fetch(request, env, ctx) {
@@ -408,7 +433,7 @@ export default {
             }
         } else if (管理员密码) {// ws代理
             await 反代参数获取(request);
-            return await 处理WS请求(request, env, userID);
+            return await 处理WS请求(request, env, ctx, userID);
         }
 
         let 伪装页URL = env.URL || 'nginx';
@@ -431,7 +456,7 @@ export default {
     }
 };
 ///////////////////////////////////////////////////////////////////////WS传输数据///////////////////////////////////////////////
-async function 处理WS请求(request, env, 默认UUID) {
+async function 处理WS请求(request, env, ctx, 默认UUID) {
     const wssPair = new WebSocketPair();
     const [clientSock, serverSock] = Object.values(wssPair);
     serverSock.accept();
@@ -440,14 +465,6 @@ async function 处理WS请求(request, env, 默认UUID) {
     const earlyData = request.headers.get('sec-websocket-protocol') || '';
     const readable = makeReadableStr(serverSock, earlyData);
     let 判断是否是木马 = null;
-    async function 读取用户(env, uuid) {
-        try {
-            const txt = await env.KV.get('users/' + uuid);
-            if (!txt) return null;
-            const obj = JSON.parse(txt);
-            return obj && obj.uuid === uuid ? obj : null;
-        } catch (e) { return null; }
-    }
     function 用户状态检查(user) {
         if (!user) return 'not_found';
         if (user.disabled) return 'disabled';
@@ -484,15 +501,15 @@ async function 处理WS请求(request, env, 默认UUID) {
                 let headerOK = chunk.byteLength >= 58 && new Uint8Array(chunk.slice(56, 58))[0] === 0x0d && new Uint8Array(chunk.slice(56, 58))[1] === 0x0a;
                 if (headerOK) {
                     const headerHash = new TextDecoder().decode(chunk.slice(0, 56));
-                    const mappedUUID = await env.KV.get('users-trojan/' + headerHash);
+                    const mappedUUID = await 读取木马映射缓存(env, headerHash);
                     if (mappedUUID) 连接用户UUID = mappedUUID;
                 }
-                const user = await 读取用户(env, 连接用户UUID);
+                const user = await 读取用户缓存(env, 连接用户UUID);
                 const reason = 用户状态检查(user);
                 if (reason) {
                     try { serverSock.close(1008, reason); } catch (e) { }
                     const 访问IP = request.headers.get('X-Real-IP') || request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || request.headers.get('True-Client-IP') || request.headers.get('Fly-Client-IP') || request.headers.get('X-Appengine-Remote-Addr') || request.headers.get('X-Forwarded-For') || request.headers.get('X-Real-IP') || request.headers.get('X-Cluster-Client-IP') || request.cf?.clientTcpRtt || '未知IP';
-                    try { await 请求日志记录(env, request, 访问IP, 'Auth_Denied', null, 连接用户UUID, reason); } catch (e) { }
+                    try { ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Auth_Denied', null, 连接用户UUID, reason)); } catch (e) { }
                     return;
                 }
                 const { port, hostname, rawClientData } = 解析木马请求(chunk, user?.trojanPassword || 连接用户UUID);
@@ -500,12 +517,12 @@ async function 处理WS请求(request, env, 默认UUID) {
                 await forwardataTCP(hostname, port, rawClientData, serverSock, null, remoteConnWrapper, 连接用户UUID);
             } else {
                 const presentedUUID = formatIdentifier(new Uint8Array(chunk.slice(1, 17)));
-                const user = await 读取用户(env, presentedUUID);
+                const user = await 读取用户缓存(env, presentedUUID);
                 const reason = 用户状态检查(user);
                 if (reason) {
                     try { serverSock.close(1008, reason); } catch (e) { }
                     const 访问IP = request.headers.get('X-Real-IP') || request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || request.headers.get('True-Client-IP') || request.headers.get('Fly-Client-IP') || request.headers.get('X-Appengine-Remote-Addr') || request.headers.get('X-Forwarded-For') || request.headers.get('X-Real-IP') || request.headers.get('X-Cluster-Client-IP') || request.cf?.clientTcpRtt || '未知IP';
-                    try { await 请求日志记录(env, request, 访问IP, 'Auth_Denied', null, presentedUUID, reason); } catch (e) { }
+                    try { ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Auth_Denied', null, presentedUUID, reason)); } catch (e) { }
                     return;
                 }
                 const { port, hostname, rawIndex, version, isUDP } = 解析魏烈思请求(chunk, presentedUUID);
